@@ -1353,10 +1353,9 @@ async function updateHeaderStats() {
     // We'll just track rated for now
   } catch(e) {}
 
-  count.textContent = `${rated} rated`;
-  // Show pct if we can estimate
+  count.textContent = '';
+  pct.textContent = '';
   if (rated > 0) {
-    pct.textContent = `~${rated} games processed`;
     fill.style.width = `${Math.min(100, rated / 50)}%`; // rough visualization
   }
 
@@ -1443,7 +1442,7 @@ function updateWishlistList() {
   container.style.display = 'block';
   items.innerHTML = entries.map(([id, info]) =>
     `<div class="wl-item">
-      <span>${esc(info.name)} <span class="wl-meta">${info.genre || ''} · ${info.year || ''}</span></span>
+      <a href="https://www.old-games.ru/game/${id}.html" target="_blank" style="color:var(--text);text-decoration:none;">${esc(info.name)} <span class="wl-meta">${info.genre || ''} · ${info.year || ''}</span></a>
       <button class="wl-remove" onclick="removeFromWishlist('${id}')">✕</button>
     </div>`
   ).join('');
