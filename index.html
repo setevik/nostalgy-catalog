@@ -170,9 +170,27 @@
     max-height: 100%;
     object-fit: contain;
     image-rendering: auto;
+    transition: opacity 0.15s;
+  }
+  .carousel img.loading { opacity: 0; }
+  .carousel-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+  .carousel-placeholder .spinner-sm {
+    width: 20px; height: 20px;
+    border: 2px solid var(--border);
+    border-top-color: var(--green);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    opacity: 0;
     transition: opacity 0.2s;
   }
-  .carousel img.loading { opacity: 0.3; }
+  .carousel-placeholder .spinner-sm.visible { opacity: 1; }
   .carousel-nav {
     position: absolute;
     top: 50%;
@@ -218,7 +236,7 @@
 
   /* Game Info */
   .game-info {
-    padding: 16px 20px;
+    padding: 20px 20px;
   }
   .game-name {
     font-family: 'Press Start 2P', cursive;
@@ -228,6 +246,18 @@
     margin-bottom: 4px;
     text-shadow: 0 0 10px rgba(255,255,255,0.1);
     word-break: break-word;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .game-name .game-year {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--amber);
+    font-weight: 500;
+    text-shadow: none;
+    white-space: nowrap;
   }
   .game-alt-names {
     font-size: 11px;
@@ -242,7 +272,7 @@
     margin-bottom: 10px;
   }
   .game-meta .tag {
-    font-size: 10px;
+    font-size: 11px;
     padding: 3px 8px;
     border-radius: 4px;
     background: var(--bg3);
@@ -253,7 +283,7 @@
   .game-meta .tag.year { border-color: var(--amber-dim); color: var(--amber); }
   .og-rating {
     font-size: 11px;
-    color: var(--text-dim);
+    color: var(--text);
     margin-bottom: 4px;
   }
   .og-rating .stars { color: var(--amber); letter-spacing: 1px; }
@@ -262,12 +292,12 @@
     margin-top: 6px;
   }
   .game-description {
-    font-size: 11px;
-    color: var(--text-dim);
+    font-size: 12px;
+    color: var(--text);
     line-height: 1.65;
     margin-top: 10px;
     margin-bottom: 4px;
-    max-height: 4.95em; /* 3 lines */
+    max-height: 5.28em; /* 3 lines */
     overflow: hidden;
     position: relative;
     transition: max-height 0.3s ease;
@@ -379,6 +409,10 @@
 
   .rate-btn.flash {
     animation: btn-flash 0.3s ease;
+  }
+  .rating-buttons.disabled .rate-btn {
+    pointer-events: none;
+    opacity: 0.35;
   }
   @keyframes btn-flash {
     0% { transform: scale(1); }
@@ -585,6 +619,55 @@
   }
   .profile-tags .ptag .pval { color: var(--green); }
 
+  /* Catalog update banner */
+  .update-banner {
+    display: none;
+    background: rgba(255, 191, 0, 0.08);
+    border: 1px solid var(--amber-dim);
+    border-radius: 6px;
+    padding: 8px 14px;
+    margin-bottom: 12px;
+    font-size: 10px;
+    color: var(--text-dim);
+    line-height: 1.6;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .update-banner.visible { display: flex; }
+  .update-banner .ub-text { flex: 1; }
+  .update-banner .ub-text b { color: var(--amber); }
+  .update-banner .ub-btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    padding: 4px 10px;
+    background: transparent;
+    color: var(--amber);
+    border: 1px solid var(--amber-dim);
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+    letter-spacing: 0.5px;
+  }
+  .update-banner .ub-btn:hover {
+    background: rgba(255, 191, 0, 0.1);
+  }
+  .update-banner .ub-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .update-banner .ub-dismiss {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .update-banner .ub-dismiss:hover { color: var(--text); }
+
   /* Toast */
   .toast {
     position: fixed;
@@ -648,6 +731,15 @@
     </div>
   </div>
 
+  <!-- Update Banner -->
+  <div class="update-banner" id="updateBanner">
+    <div class="ub-text" id="updateText">
+      Catalog is <b id="updateAge">?</b> days old.
+    </div>
+    <button class="ub-btn" id="updateBtn" onclick="triggerUpdate()">UPDATE</button>
+    <button class="ub-dismiss" onclick="dismissUpdate()" title="Dismiss">×</button>
+  </div>
+
   <!-- Scan Screen -->
   <div id="scanScreen" class="scan-screen" style="display:none;">
     <h2>CATALOG SCAN</h2>
@@ -681,6 +773,7 @@
       <div class="carousel" id="carousel">
         <button class="carousel-nav prev" onclick="prevScreenshot()">&#9664;</button>
         <img id="screenshotImg" src="" alt="screenshot">
+        <div class="carousel-placeholder"><div class="spinner-sm" id="carouselSpinner"></div></div>
         <button class="carousel-nav next" onclick="nextScreenshot()">&#9654;</button>
         <div class="carousel-counter" id="carouselCounter"></div>
         <div class="carousel-empty" id="carouselEmpty" style="display:none;">No screenshots</div>
@@ -767,9 +860,17 @@ let currentGame = null;
 let screenshotIndex = 0;
 let totalGames = 0;
 let isLoading = false;
+let isRating = false;  // blocks double-clicks during rate→loadNext cycle
 let lastRatedId = null;
+
+function setRatingLock(locked) {
+  isRating = locked;
+  document.querySelector('.rating-buttons')?.classList.toggle('disabled', locked);
+}
 let statsVisible = false;
 let wishlistData = {};
+let preloadedImages = {};  // url -> Image object cache
+let nextGameData = null;   // prefetched next game
 
 // --- Init ---
 async function init() {
@@ -777,13 +878,89 @@ async function init() {
   wishlistData = ratings.wishlist || {};
   const status = await fetchJSON('/api/catalog/status');
 
-  if (status.done && status.total > 0) {
-    // Catalog ready
+  if (status.totalGames > 0) {
+    // Catalog ready — show games immediately
     showGameView();
     loadNext();
+
+    if (status.scanning && status.mode === 'incremental') {
+      // Background update running — show banner, auto-hides on completion
+      showUpdateBanner(status.ageDays, true);
+      pollUpdateProgress();
+    }
+  } else if (status.scanning) {
+    // First scan in progress
+    showScanScreen();
+    pollScanProgress();
   } else {
+    // No catalog, no scan (shouldn't happen with auto-start, but safe fallback)
     showScanScreen();
   }
+}
+
+function showUpdateBanner(ageDays, isUpdating) {
+  const banner = document.getElementById('updateBanner');
+  const ageEl = document.getElementById('updateAge');
+  const btn = document.getElementById('updateBtn');
+  const textEl = document.getElementById('updateText');
+
+  banner.classList.add('visible');
+  if (isUpdating) {
+    textEl.innerHTML = 'Updating catalog...';
+    btn.disabled = true;
+    btn.textContent = 'UPDATING...';
+  } else {
+    ageEl.textContent = Math.round(ageDays);
+    textEl.innerHTML = `Catalog is <b>${Math.round(ageDays)}</b> days old.`;
+    btn.disabled = false;
+    btn.textContent = 'UPDATE';
+  }
+}
+
+function dismissUpdate() {
+  document.getElementById('updateBanner').classList.remove('visible');
+}
+
+async function triggerUpdate() {
+  const btn = document.getElementById('updateBtn');
+  btn.disabled = true;
+  btn.textContent = 'UPDATING...';
+  document.getElementById('updateText').innerHTML = 'Checking for new games...';
+
+  try {
+    await fetchJSON('/api/catalog/update', { method: 'POST' });
+    pollUpdateProgress();
+  } catch (e) {
+    showToast('Update failed');
+    btn.disabled = false;
+    btn.textContent = 'UPDATE';
+  }
+}
+
+async function pollUpdateProgress() {
+  const poll = async () => {
+    const s = await fetchJSON('/api/catalog/status');
+
+    if (s.scanning) {
+      const textEl = document.getElementById('updateText');
+      const mode = s.mode || 'incremental';
+      if (mode === 'full') {
+        textEl.innerHTML = `Full re-scan: <b>${s.scanned}/${s.total || '?'}</b> pages...`;
+      } else {
+        textEl.innerHTML = `Quick update: <b>${s.scanned}/${s.total || '?'}</b> pages checked...`;
+      }
+      setTimeout(poll, 1500);
+      return;
+    }
+
+    // Done
+    const banner = document.getElementById('updateBanner');
+    const textEl = document.getElementById('updateText');
+    textEl.innerHTML = `Updated! <b>${s.totalGames}</b> games in catalog.`;
+    setTimeout(() => banner.classList.remove('visible'), 3000);
+    showToast(`Catalog updated: ${s.totalGames} games`);
+  };
+  poll();
 }
 
 function showScanScreen() {
@@ -820,9 +997,13 @@ async function pollScanProgress() {
       bar.style.width = `${Math.round(100 * s.scanned / s.total)}%`;
     }
 
-    if (s.done) {
+    if (s.done && s.totalGames > 0) {
       showGameView();
       loadNext();
+      return;
+    }
+    if (!s.scanning && s.done) {
+      // Scan finished but no games — shouldn't happen, stay on scan screen
       return;
     }
     setTimeout(poll, 2000);
@@ -839,7 +1020,15 @@ async function loadNext() {
   card.classList.remove('card-enter');
 
   try {
-    const game = await fetchJSON('/api/next');
+    // Use prefetched game if available, otherwise fetch fresh
+    let game;
+    if (nextGameData) {
+      game = nextGameData;
+      nextGameData = null;
+    } else {
+      game = await fetchJSON('/api/next');
+    }
+
     if (game.error || game.done) {
       document.getElementById('gameView').style.display = 'none';
       document.getElementById('doneScreen').style.display = 'block';
@@ -847,16 +1036,56 @@ async function loadNext() {
     }
     currentGame = game;
     screenshotIndex = 0;
+    // Clear old screenshot immediately to avoid flash
+    const img = document.getElementById('screenshotImg');
+    img.src = '';
+    img.style.display = 'none';
     renderGame(game);
 
     // Trigger enter animation
     void card.offsetWidth;
     card.classList.add('card-enter');
+
+    // Prefetch next game data + preload its screenshots
+    prefetchNextGame();
   } catch (e) {
     showToast('Failed to load next game');
     console.error(e);
   } finally {
     isLoading = false;
+  }
+}
+
+function prefetchNextGame() {
+  // Fetch next game data in background
+  fetchJSON('/api/next').then(game => {
+    if (game && !game.error && !game.done) {
+      nextGameData = game;
+      // Preload first few screenshots into browser cache
+      preloadGameImages(game);
+    }
+  }).catch(() => {});
+}
+
+function preloadGameImages(game) {
+  const shots = game?.screenshots || [];
+  // Preload first 3 screenshots
+  const toPreload = shots.slice(0, 3);
+  for (const shot of toPreload) {
+    const url = shot.full || shot.thumb;
+    const proxyUrl = `/api/proxy?url=${encodeURIComponent(url)}`;
+    if (!preloadedImages[proxyUrl]) {
+      const img = new Image();
+      img.src = proxyUrl;
+      preloadedImages[proxyUrl] = img;
+    }
+  }
+  // Keep cache from growing unbounded — drop old entries
+  const keys = Object.keys(preloadedImages);
+  if (keys.length > 20) {
+    for (const old of keys.slice(0, keys.length - 20)) {
+      delete preloadedImages[old];
+    }
   }
 }
 
@@ -874,8 +1103,10 @@ function renderGame(game) {
   // Screenshots
   renderScreenshot();
 
-  // Name
-  document.getElementById('gameName').textContent = game.name || 'Unknown';
+  // Name + Year
+  const nameEl = document.getElementById('gameName');
+  const yearStr = game.year ? `<span class="game-year">(${game.year})</span>` : '';
+  nameEl.innerHTML = `<span>${esc(game.name || 'Unknown')}</span>${yearStr}`;
 
   // Alt names
   const altEl = document.getElementById('gameAltNames');
@@ -883,11 +1114,10 @@ function renderGame(game) {
   altEl.textContent = alts.length ? 'aka: ' + alts.join(' · ') : '';
   altEl.style.display = alts.length ? 'block' : 'none';
 
-  // Meta tags
+  // Meta tags (no year — already shown next to name)
   const metaEl = document.getElementById('gameMeta');
   metaEl.innerHTML = '';
   if (game.genre) metaEl.innerHTML += `<span class="tag genre">${esc(game.genre)}</span>`;
-  if (game.year) metaEl.innerHTML += `<span class="tag year">${game.year}</span>`;
   if (game.platform) metaEl.innerHTML += `<span class="tag">${esc(game.platform)}</span>`;
   if (game.publisher && game.publisher !== '-') metaEl.innerHTML += `<span class="tag">${esc(game.publisher)}</span>`;
 
@@ -929,7 +1159,7 @@ function updateWishlistBtn() {
 }
 
 async function toggleWishlist() {
-  if (!currentGame) return;
+  if (!currentGame || isRating) return;
   const gid = String(currentGame.id);
   const isWished = gid in wishlistData;
 
@@ -942,6 +1172,7 @@ async function toggleWishlist() {
     if (resp.wishlist !== undefined) {
       wishlistData = resp.wishlist;
     }
+    if (resp.profile) updateProfile(resp.profile);
     updateWishlistBtn();
     showToast(isWished ? 'Removed from wishlist' : 'Added to wishlist ☆');
   } catch (e) {
@@ -953,17 +1184,19 @@ function renderScreenshot() {
   const img = document.getElementById('screenshotImg');
   const counter = document.getElementById('carouselCounter');
   const empty = document.getElementById('carouselEmpty');
+  const spinner = document.getElementById('carouselSpinner');
   const shots = currentGame?.screenshots || [];
 
   if (shots.length === 0) {
     img.style.display = 'none';
+    img.src = '';
     counter.style.display = 'none';
     empty.style.display = 'block';
+    spinner.classList.remove('visible');
     return;
   }
 
   empty.style.display = 'none';
-  img.style.display = 'block';
   counter.style.display = 'block';
 
   if (screenshotIndex >= shots.length) screenshotIndex = 0;
@@ -972,12 +1205,48 @@ function renderScreenshot() {
   const url = shots[screenshotIndex].full || shots[screenshotIndex].thumb;
   const proxyUrl = `/api/proxy?url=${encodeURIComponent(url)}`;
 
-  img.classList.add('loading');
-  img.onload = () => img.classList.remove('loading');
-  img.onerror = () => { img.classList.remove('loading'); img.alt = 'Failed to load'; };
-  img.src = proxyUrl;
+  // Check if this image was preloaded and is ready
+  const preloaded = preloadedImages[proxyUrl];
+  if (preloaded && preloaded.complete && preloaded.naturalWidth > 0) {
+    // Instant display — no spinner
+    img.onload = null;
+    img.onerror = null;
+    img.src = proxyUrl;
+    img.style.display = 'block';
+    img.classList.remove('loading');
+    spinner.classList.remove('visible');
+  } else {
+    // Not preloaded — show spinner while loading
+    img.classList.add('loading');
+    spinner.classList.add('visible');
+    img.style.display = 'block';
+
+    img.onload = () => {
+      img.classList.remove('loading');
+      spinner.classList.remove('visible');
+    };
+    img.onerror = () => {
+      img.classList.remove('loading');
+      spinner.classList.remove('visible');
+      img.alt = 'Failed to load';
+    };
+    img.src = proxyUrl;
+  }
 
   counter.textContent = `${screenshotIndex + 1} / ${shots.length}`;
+
+  // Preload adjacent screenshots for carousel navigation
+  for (const offset of [1, -1, 2]) {
+    const adjIdx = (screenshotIndex + offset + shots.length) % shots.length;
+    if (adjIdx === screenshotIndex) continue;
+    const adjUrl = shots[adjIdx].full || shots[adjIdx].thumb;
+    const adjProxy = `/api/proxy?url=${encodeURIComponent(adjUrl)}`;
+    if (!preloadedImages[adjProxy]) {
+      const pre = new Image();
+      pre.src = adjProxy;
+      preloadedImages[adjProxy] = pre;
+    }
+  }
 }
 
 function nextScreenshot() {
@@ -994,7 +1263,8 @@ function prevScreenshot() {
 
 // --- Rating ---
 async function rate(rating, btnEl) {
-  if (!currentGame || isLoading) return;
+  if (!currentGame || isLoading || isRating) return;
+  setRatingLock(true);
 
   // Flash button
   if (btnEl) {
@@ -1018,11 +1288,12 @@ async function rate(rating, btnEl) {
     console.error('Rating save failed:', e);
   }
 
-  loadNext();
+  await loadNext();
+  setRatingLock(false);
 }
 
 async function undoLast() {
-  if (!lastRatedId) {
+  if (!lastRatedId || isRating) {
     showToast('Nothing to undo');
     return;
   }
@@ -1034,6 +1305,7 @@ async function undoLast() {
       body: JSON.stringify({ gameId: lastRatedId, rating: null })
     });
     lastRatedId = null;
+    nextGameData = null;  // Queue changed, discard prefetch
     showToast('Undone — showing previous game');
     loadNext();
   } catch (e) {
