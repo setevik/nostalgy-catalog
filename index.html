@@ -1132,7 +1132,7 @@ function renderGame(game) {
 
   // Link
   document.getElementById('ogLink').innerHTML =
-    `<a href="https://www.old-games.ru/game/${game.id}.html" target="_blank" rel="noopener">↗ View on old-games.ru</a>`;
+    `<a href="${game.sourceUrl}" target="_blank" rel="noopener">↗ View on ${game.sourceName || 'source'}</a>`;
 
   // Description
   const descEl = document.getElementById('gameDesc');
@@ -1426,7 +1426,7 @@ async function updateExceptionalList() {
 
 function openOG() {
   if (!currentGame) return;
-  window.open(`https://www.old-games.ru/game/${currentGame.id}.html`, '_blank');
+  window.open(currentGame.sourceUrl, '_blank');
 }
 
 function updateWishlistList() {
@@ -1442,7 +1442,7 @@ function updateWishlistList() {
   container.style.display = 'block';
   items.innerHTML = entries.map(([id, info]) =>
     `<div class="wl-item">
-      <a href="https://www.old-games.ru/game/${id}.html" target="_blank" style="color:var(--text);text-decoration:none;">${esc(info.name)} <span class="wl-meta">${info.genre || ''} · ${info.year || ''}</span></a>
+      <a href="${info.sourceUrl || '#'}" target="_blank" style="color:var(--text);text-decoration:none;">${esc(info.name)} <span class="wl-meta">${info.genre || ''} · ${info.year || ''}</span></a>
       <button class="wl-remove" onclick="removeFromWishlist('${id}')">✕</button>
     </div>`
   ).join('');

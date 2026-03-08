@@ -16,11 +16,252 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+
+# --- Source Architecture ---
+
+class GameSource:
+    """Base class for game catalog sources."""
+    SOURCE_ID = ""
+    SOURCE_NAME = ""
+    BASE_URL = ""
+    PROXY_DOMAINS = set()
+
+    def game_url(self, local_id):
+        raise NotImplementedError
+
+    def catalog_page_url(self, page):
+        raise NotImplementedError
+
+    def get_max_page(self, html):
+        raise NotImplementedError
+
+    def parse_catalog_page(self, html):
+        """Parse a catalog page. Returns list of dicts with keys:
+        local_id, name, genre, year, platform, publisher, rating"""
+        raise NotImplementedError
+
+    def parse_game_detail(self, local_id):
+        """Fetch and parse game detail + screenshots.
+        Returns {description, screenshots}"""
+        raise NotImplementedError
+
+
+class OldGamesRuSource(GameSource):
+    SOURCE_ID = "og"
+    SOURCE_NAME = "old-games.ru"
+    BASE_URL = "https://www.old-games.ru"
+    PROXY_DOMAINS = {"old-games.ru", "www.old-games.ru", "static.old-games.ru"}
+
+    def game_url(self, local_id):
+        return f"{self.BASE_URL}/game/{local_id}.html"
+
+    def catalog_page_url(self, page):
+        return f"{self.BASE_URL}/catalog/?sort=name&page={page}"
+
+    def get_max_page(self, html):
+        soup = BeautifulSoup(html, "html.parser")
+        max_page = 1
+        for a in soup.find_all("a", href=re.compile(r"page=\d+")):
+            m = re.search(r"page=(\d+)", a.get("href", ""))
+            if m:
+                max_page = max(max_page, int(m.group(1)))
+        return max_page
+
+    def parse_catalog_page(self, html):
+        soup = BeautifulSoup(html, "html.parser")
+        games = []
+        seen_ids = set()
+
+        all_links = soup.find_all("a", href=True)
+        game_entries = []
+        current_entry = None
+
+        for a in all_links:
+            href = a.get("href", "")
+            text = a.get_text(strip=True)
+
+            game_match = re.match(r"^/game/(\d+)\.html$", href)
+            if game_match:
+                gid = int(game_match.group(1))
+                if text and len(text) >= 2:
+                    if current_entry and current_entry["local_id"] not in seen_ids:
+                        game_entries.append(current_entry)
+                        seen_ids.add(current_entry["local_id"])
+                    current_entry = {
+                        "local_id": gid,
+                        "name": text,
+                        "altNames": [],
+                        "genre": "",
+                        "year": 0,
+                        "platform": "",
+                        "publisher": "",
+                        "rating": 0,
+                        "_has_meta": False,
+                    }
+                continue
+
+            if current_entry:
+                if "genre=" in href and not current_entry["genre"]:
+                    current_entry["genre"] = text
+                    current_entry["_has_meta"] = True
+                elif "year=" in href and not current_entry["year"]:
+                    try:
+                        current_entry["year"] = int(re.search(r"\d{4}", text).group())
+                        current_entry["_has_meta"] = True
+                    except:
+                        pass
+                elif "platform=" in href and not current_entry["platform"]:
+                    current_entry["platform"] = text
+                    current_entry["_has_meta"] = True
+                elif "publisherCompany=" in href and not current_entry["publisher"]:
+                    current_entry["publisher"] = text
+                    current_entry["_has_meta"] = True
+
+        if current_entry and current_entry["local_id"] not in seen_ids:
+            game_entries.append(current_entry)
+
+        full_text = str(soup)
+
+        for entry in game_entries:
+            game_link_pattern = f'/game/{entry["local_id"]}.html'
+            idx = full_text.find(game_link_pattern)
+            if idx >= 0:
+                window = full_text[idx:idx + 2000]
+                m = re.search(r'Оценка рецензента\s*-\s*(\d+)\s*из\s*10', window)
+                if m:
+                    entry["rating"] = int(m.group(1))
+
+        result = []
+        for entry in game_entries:
+            del entry["_has_meta"]
+            if entry["genre"] or entry["year"] or entry["platform"]:
+                result.append(entry)
+
+        return result
+
+    def parse_game_detail(self, local_id):
+        result = {"description": "", "screenshots": []}
+
+        # Screenshots page
+        try:
+            url = f"{self.BASE_URL}/game/screenshots/{local_id}.html"
+            html = fetch_cached(url)
+            soup = BeautifulSoup(html, "html.parser")
+
+            for a in soup.find_all("a", href=re.compile(r"screenshots/")):
+                href = a.get("href", "")
+                if not href or "thumbs" in href:
+                    continue
+                img = a.find("img")
+                if img:
+                    thumb = img.get("src", "")
+                    full = href
+                    if thumb.startswith("/"):
+                        thumb = self.BASE_URL + thumb
+                    elif not thumb.startswith("http"):
+                        thumb = self.BASE_URL + "/" + thumb
+                    if full.startswith("/"):
+                        full = self.BASE_URL + full
+                    elif not full.startswith("http"):
+                        full = self.BASE_URL + "/" + full
+                    result["screenshots"].append({"thumb": thumb, "full": full})
+        except Exception as e:
+            print(f"  Screenshots fetch failed for {local_id}: {e}")
+
+        # Game page for description
+        try:
+            url = f"{self.BASE_URL}/game/{local_id}.html"
+            html = fetch_cached(url)
+            soup = BeautifulSoup(html, "html.parser")
+
+            full_text = soup.get_text(separator="\n")
+
+            start_idx = 0
+            for marker in ["Играть в браузере", "Обложки (", "Обложки(", "Видео (", "Видео("]:
+                idx = full_text.find(marker)
+                if idx >= 0:
+                    nl = full_text.find("\n", idx)
+                    if nl >= 0:
+                        start_idx = max(start_idx, nl + 1)
+
+            screenshot_zone_end = start_idx
+            for i in range(start_idx, min(start_idx + 500, len(full_text))):
+                chunk = full_text[start_idx:i]
+                if "Скриншот:" in chunk or "скриншот:" in chunk:
+                    nl = full_text.find("\n", i)
+                    if nl >= 0:
+                        screenshot_zone_end = nl + 1
+            start_idx = max(start_idx, screenshot_zone_end)
+
+            end_idx = len(full_text)
+            for marker in [
+                "Автор обзора:",
+                "Развернуть описание",
+                "Время и место:",
+                "Особенность геймплея:",
+                "Перспектива:",
+                "Страна или регион",
+                "Тематика:",
+                "Технические детали:",
+                "Элемент жанра:",
+                "Язык:",
+                "Рекомендуемые",
+                "Незарегистрированные",
+                "Комментарии к игре",
+            ]:
+                idx = full_text.find(marker, start_idx)
+                if start_idx < idx < end_idx:
+                    end_idx = idx
+                    break
+
+            desc = ""
+            if start_idx < end_idx:
+                raw = full_text[start_idx:end_idx].strip()
+                lines = raw.split("\n")
+                clean = []
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        if clean and clean[-1] != "":
+                            clean.append("")
+                        continue
+                    if len(line) < 5:
+                        continue
+                    clean.append(line)
+
+                desc = "\n".join(clean).strip()
+                desc = desc.strip()
+
+            result["description"] = desc[:2000] if desc else ""
+        except Exception as e:
+            print(f"  Detail fetch failed for {local_id}: {e}")
+
+        return result
+
+
+# --- Source Registry + ID Utilities ---
+
+SOURCE_PRIORITY = ["og"]
+SOURCES = {"og": OldGamesRuSource()}
+ALLOWED_PROXY_DOMAINS = set()
+for _src in SOURCES.values():
+    ALLOWED_PROXY_DOMAINS.update(_src.PROXY_DOMAINS)
+
+
+def make_game_id(source_id, local_id):
+    return f"{source_id}:{local_id}"
+
+
+def parse_game_id(game_id):
+    s = str(game_id)
+    if ":" in s:
+        src, lid = s.split(":", 1)
+        return src, lid
+    return "og", s
+
+
 # --- Config ---
 PORT = 8765
-OG_BASE = "https://www.old-games.ru"
-STATIC_BASE = "https://static.old-games.ru"
-ALLOWED_PROXY_DOMAINS = {"old-games.ru", "www.old-games.ru", "static.old-games.ru"}
 RATE_LIMIT_SEC = 1.0
 CACHE_DIR = Path("cache")
 CATALOG_INDEX_FILE = Path("catalog_index.json")
@@ -80,123 +321,56 @@ def fetch_cached(url, max_age=7 * 86400):
 
 
 
-# --- Catalog Parsing ---
+# --- Merge Logic ---
 
-def parse_catalog_page(html):
-    """Parse a catalog page, return list of game dicts.
+def match_key(game):
+    """Normalized (name, year, platform) for cross-source dedup."""
+    name = (game.get("name") or "").strip().lower()
+    year = game.get("year", 0)
+    platform = (game.get("platform") or "").strip().lower()
+    return (name, year, platform)
 
-    The catalog table structure:
-      <table>
-        <tr> header: Название | Жанр | Год | Платформа | Издатель | Оценка </tr>
-        <tr> game entry (may have nested table in first cell for thumb+name) </tr>
-        ...
-      </table>
 
-    The game link, genre link, year link, platform link, publisher link, and rating
-    are ALL findable via <a> tags with specific href patterns within each outer <tr>.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    games = []
-    seen_ids = set()
+def merge_catalogs(source_games_by_id):
+    """Merge per-source game lists into unified catalog entries.
+    Fields filled from highest-priority source first.
+    With a single source this is essentially a passthrough that prefixes IDs."""
+    merged = {}  # match_key -> game dict
 
-    # Strategy: find ALL <tr> elements that contain a /game/{id}.html link
-    # AND at least one metadata link (genre/year/platform).
-    # Collect them from the entire page, then deduplicate.
-    #
-    # To avoid sidebar contamination, we require metadata links to be present.
+    for src_id in SOURCE_PRIORITY:
+        games = source_games_by_id.get(src_id, [])
+        for g in games:
+            local_id = g["local_id"]
+            game_id = make_game_id(src_id, local_id)
+            key = match_key(g)
 
-    # First pass: collect all links by their enclosing context
-    # Use a "zone" approach — gather all links between consecutive game links
-    all_links = soup.find_all("a", href=True)
-
-    # Build a flat list of relevant links in document order
-    game_entries = []
-    current_entry = None
-
-    for a in all_links:
-        href = a.get("href", "")
-        text = a.get_text(strip=True)
-
-        game_match = re.match(r"^/game/(\d+)\.html$", href)
-        if game_match:
-            gid = int(game_match.group(1))
-            if text and len(text) >= 2:
-                # Start a new entry
-                if current_entry and current_entry["id"] not in seen_ids:
-                    game_entries.append(current_entry)
-                    seen_ids.add(current_entry["id"])
-                current_entry = {
-                    "id": gid,
-                    "name": text,
-                    "altNames": [],
-                    "genre": "",
-                    "year": 0,
-                    "platform": "",
-                    "publisher": "",
-                    "ratingOG": 0,
-                    "_has_meta": False,
+            if key in merged:
+                # Game already exists from higher-priority source — add this source reference
+                existing = merged[key]
+                existing["sources"][src_id] = local_id
+                # Fill empty fields from this source
+                for field in ("genre", "year", "platform", "publisher"):
+                    if not existing.get(field) and g.get(field):
+                        existing[field] = g[field]
+                # Store source-specific rating
+                if g.get("rating"):
+                    existing[f"rating_{src_id}"] = g["rating"]
+            else:
+                merged[key] = {
+                    "id": game_id,
+                    "name": g.get("name", ""),
+                    "genre": g.get("genre", ""),
+                    "year": g.get("year", 0),
+                    "platform": g.get("platform", ""),
+                    "publisher": g.get("publisher", ""),
+                    f"rating_{src_id}": g.get("rating", 0),
+                    "sources": {src_id: local_id},
                 }
-            continue
 
-        # If we have a current entry being built, check if this link adds metadata
-        if current_entry:
-            if "genre=" in href and not current_entry["genre"]:
-                current_entry["genre"] = text
-                current_entry["_has_meta"] = True
-            elif "year=" in href and not current_entry["year"]:
-                try:
-                    current_entry["year"] = int(re.search(r"\d{4}", text).group())
-                    current_entry["_has_meta"] = True
-                except:
-                    pass
-            elif "platform=" in href and not current_entry["platform"]:
-                current_entry["platform"] = text
-                current_entry["_has_meta"] = True
-            elif "publisherCompany=" in href and not current_entry["publisher"]:
-                current_entry["publisher"] = text
-                current_entry["_has_meta"] = True
-
-    # Don't forget the last entry
-    if current_entry and current_entry["id"] not in seen_ids:
-        game_entries.append(current_entry)
-
-    # Now extract ratings — they're in text nodes or img alt attributes near each game.
-    # Since we can't easily associate them via link order, search the full text.
-    full_text = str(soup)
-
-    for entry in game_entries:
-        # Find rating near this game's link in the HTML
-        game_link_pattern = f'/game/{entry["id"]}.html'
-        idx = full_text.find(game_link_pattern)
-        if idx >= 0:
-            # Search a window after the game link for rating
-            window = full_text[idx:idx + 2000]
-            # Rating as img alt
-            m = re.search(r'Оценка рецензента\s*-\s*(\d+)\s*из\s*10', window)
-            if m:
-                entry["ratingOG"] = int(m.group(1))
-
-    # Filter: only keep entries that have at least some metadata
-    # (to exclude sidebar/random links that only have name)
-    result = []
-    for entry in game_entries:
-        del entry["_has_meta"]
-        if entry["genre"] or entry["year"] or entry["platform"]:
-            result.append(entry)
-
-    return result
+    return list(merged.values())
 
 
-def get_max_page(html):
-    """Get max page number from catalog pagination."""
-    soup = BeautifulSoup(html, "html.parser")
-    max_page = 1
-    for a in soup.find_all("a", href=re.compile(r"page=\d+")):
-        m = re.search(r"page=(\d+)", a.get("href", ""))
-        if m:
-            max_page = max(max_page, int(m.group(1)))
-    return max_page
-
+# --- Catalog Scanning ---
 
 def scan_catalog(force_fresh=True):
     """Full scan of all catalog pages to build index."""
@@ -204,38 +378,44 @@ def scan_catalog(force_fresh=True):
     scan_progress = {"total": 0, "scanned": 0, "done": False, "scanning": True, "mode": "full"}
 
     try:
-        # First page to get total pages — always fresh for scans
-        url = f"{OG_BASE}/catalog/?sort=name&page=1"
-        html = fetch_cached(url, max_age=0 if force_fresh else 365 * 86400)
-        max_page = get_max_page(html)
-        scan_progress["total"] = max_page
+        all_source_games = {}
 
-        all_games = parse_catalog_page(html)
-        scan_progress["scanned"] = 1
+        for src_id in SOURCE_PRIORITY:
+            source = SOURCES[src_id]
+            url = source.catalog_page_url(1)
+            html = fetch_cached(url, max_age=0 if force_fresh else 365 * 86400)
+            max_page = source.get_max_page(html)
+            scan_progress["total"] = max_page
 
-        seen_ids = {g["id"] for g in all_games}
+            games = source.parse_catalog_page(html)
+            scan_progress["scanned"] = 1
 
-        for page in range(2, max_page + 1):
-            url = f"{OG_BASE}/catalog/?sort=name&page={page}"
-            try:
-                html = fetch_cached(url, max_age=0 if force_fresh else 365 * 86400)
-                games = parse_catalog_page(html)
-                for g in games:
-                    if g["id"] not in seen_ids:
-                        all_games.append(g)
-                        seen_ids.add(g["id"])
-            except Exception as e:
-                print(f"  Warning: page {page} failed: {e}")
-            scan_progress["scanned"] = page
+            seen_ids = {g["local_id"] for g in games}
+
+            for page in range(2, max_page + 1):
+                url = source.catalog_page_url(page)
+                try:
+                    html = fetch_cached(url, max_age=0 if force_fresh else 365 * 86400)
+                    page_games = source.parse_catalog_page(html)
+                    for g in page_games:
+                        if g["local_id"] not in seen_ids:
+                            games.append(g)
+                            seen_ids.add(g["local_id"])
+                except Exception as e:
+                    print(f"  Warning: {src_id} page {page} failed: {e}")
+                scan_progress["scanned"] = page
+
+            all_source_games[src_id] = games
+
+        merged = merge_catalogs(all_source_games)
 
         catalog_index = {
             "scannedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "totalGames": len(all_games),
-            "maxPages": max_page,
-            "games": all_games,
+            "totalGames": len(merged),
+            "games": merged,
         }
         CATALOG_INDEX_FILE.write_text(json.dumps(catalog_index, ensure_ascii=False, indent=1), encoding="utf-8")
-        print(f"Full scan complete: {len(all_games)} games indexed across {max_page} pages.")
+        print(f"Full scan complete: {len(merged)} games indexed.")
     except Exception as e:
         print(f"Catalog scan error: {e}")
     finally:
@@ -249,73 +429,77 @@ def incremental_scan():
     global catalog_index, scan_progress
 
     old_games = {g["id"]: g for g in catalog_index.get("games", [])}
-    old_max_pages = catalog_index.get("maxPages", 0)
     old_count = len(old_games)
 
     scan_progress = {"total": 0, "scanned": 0, "done": False, "scanning": True, "mode": "incremental"}
 
     try:
-        # Fetch page 1 fresh to get current max_page
-        url = f"{OG_BASE}/catalog/?sort=name&page=1"
-        html = fetch_cached(url, max_age=0)
-        current_max_page = get_max_page(html)
+        for src_id in SOURCE_PRIORITY:
+            source = SOURCES[src_id]
 
-        if current_max_page != old_max_pages:
-            # Pagination changed — alphabetical inserts shifted pages.
-            # Fall back to full scan.
-            print(f"Page count changed ({old_max_pages} -> {current_max_page}), running full scan.")
-            scan_catalog(force_fresh=True)
-            return
+            # Fetch page 1 fresh to get current max_page
+            url = source.catalog_page_url(1)
+            html = fetch_cached(url, max_age=0)
+            current_max_page = source.get_max_page(html)
 
-        # Build list of pages to check:
-        # first 3 + last 3 + random middle sample
-        pages_to_check = set()
-        # First pages
-        for p in range(1, min(4, current_max_page + 1)):
-            pages_to_check.add(p)
-        # Last pages
-        for p in range(max(1, current_max_page - 2), current_max_page + 1):
-            pages_to_check.add(p)
-        # Random middle sample
-        middle = list(range(4, max(4, current_max_page - 2)))
-        if middle:
-            sample_size = min(len(middle), QUICK_SCAN_PAGES - len(pages_to_check))
-            pages_to_check.update(random.sample(middle, max(0, sample_size)))
+            # Build list of pages to check:
+            # first 3 + last 3 + random middle sample
+            pages_to_check = set()
+            for p in range(1, min(4, current_max_page + 1)):
+                pages_to_check.add(p)
+            for p in range(max(1, current_max_page - 2), current_max_page + 1):
+                pages_to_check.add(p)
+            middle = list(range(4, max(4, current_max_page - 2)))
+            if middle:
+                sample_size = min(len(middle), QUICK_SCAN_PAGES - len(pages_to_check))
+                pages_to_check.update(random.sample(middle, max(0, sample_size)))
 
-        pages_sorted = sorted(pages_to_check)
-        scan_progress["total"] = len(pages_sorted)
+            pages_sorted = sorted(pages_to_check)
+            scan_progress["total"] = len(pages_sorted)
 
-        new_count = 0
-        updated_count = 0
+            new_count = 0
+            updated_count = 0
 
-        for i, page in enumerate(pages_sorted):
-            url = f"{OG_BASE}/catalog/?sort=name&page={page}"
-            try:
-                page_html = fetch_cached(url, max_age=0) if page != 1 else html
-                games = parse_catalog_page(page_html)
-                for g in games:
-                    if g["id"] not in old_games:
-                        old_games[g["id"]] = g
-                        new_count += 1
-                    else:
-                        # Update metadata if it was previously empty
-                        existing = old_games[g["id"]]
-                        changed = False
-                        for field in ("genre", "year", "platform", "publisher", "ratingOG"):
-                            if g.get(field) and not existing.get(field):
-                                existing[field] = g[field]
+            for i, page in enumerate(pages_sorted):
+                url = source.catalog_page_url(page)
+                try:
+                    page_html = fetch_cached(url, max_age=0) if page != 1 else html
+                    games = source.parse_catalog_page(page_html)
+                    for g in games:
+                        game_id = make_game_id(src_id, g["local_id"])
+                        if game_id not in old_games:
+                            old_games[game_id] = {
+                                "id": game_id,
+                                "name": g.get("name", ""),
+                                "genre": g.get("genre", ""),
+                                "year": g.get("year", 0),
+                                "platform": g.get("platform", ""),
+                                "publisher": g.get("publisher", ""),
+                                f"rating_{src_id}": g.get("rating", 0),
+                                "sources": {src_id: g["local_id"]},
+                            }
+                            new_count += 1
+                        else:
+                            existing = old_games[game_id]
+                            changed = False
+                            for field in ("genre", "year", "platform", "publisher"):
+                                if g.get(field) and not existing.get(field):
+                                    existing[field] = g[field]
+                                    changed = True
+                            rating_key = f"rating_{src_id}"
+                            if g.get("rating") and not existing.get(rating_key):
+                                existing[rating_key] = g["rating"]
                                 changed = True
-                        if changed:
-                            updated_count += 1
-            except Exception as e:
-                print(f"  Warning: incremental page {page} failed: {e}")
-            scan_progress["scanned"] = i + 1
+                            if changed:
+                                updated_count += 1
+                except Exception as e:
+                    print(f"  Warning: {src_id} incremental page {page} failed: {e}")
+                scan_progress["scanned"] = i + 1
 
         # Rebuild catalog_index
         catalog_index = {
             "scannedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "totalGames": len(old_games),
-            "maxPages": current_max_page,
             "games": list(old_games.values()),
         }
         CATALOG_INDEX_FILE.write_text(json.dumps(catalog_index, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -339,137 +523,6 @@ def get_catalog_age_seconds():
         return time.time() - time.mktime(t)
     except:
         return float("inf")
-
-
-# --- Game Detail Parsing ---
-
-def parse_game_detail(game_id):
-    """Fetch and parse game detail + screenshots."""
-    result = {"id": game_id, "description": "", "screenshots": []}
-
-    # Screenshots page
-    try:
-        url = f"{OG_BASE}/game/screenshots/{game_id}.html"
-        html = fetch_cached(url)
-        soup = BeautifulSoup(html, "html.parser")
-
-        for a in soup.find_all("a", href=re.compile(r"screenshots/")):
-            href = a.get("href", "")
-            if not href or "thumbs" in href:
-                continue
-            img = a.find("img")
-            if img:
-                thumb = img.get("src", "")
-                full = href
-                # Make absolute
-                if thumb.startswith("/"):
-                    thumb = OG_BASE + thumb
-                elif not thumb.startswith("http"):
-                    thumb = OG_BASE + "/" + thumb
-                if full.startswith("/"):
-                    full = OG_BASE + full
-                elif not full.startswith("http"):
-                    full = OG_BASE + "/" + full
-                result["screenshots"].append({"thumb": thumb, "full": full})
-    except Exception as e:
-        print(f"  Screenshots fetch failed for {game_id}: {e}")
-
-    # Game page for description
-    # Page structure (from real HTML analysis):
-    #   ... nav, login, breadcrumbs ...
-    #   <h1>Game Name</h1>
-    #   ... metadata table (genre, year, platform) ...
-    #   ... tabs: Описание | Файлы | Скриншоты | Видео | Обложки ...
-    #   ... 3 thumbnail previews ...
-    #   [REVIEW/DESCRIPTION TEXT]           <-- we want THIS
-    #   "Автор обзора: [name]"             <-- end of description
-    #   ... properties (Время и место, Элемент жанра, etc.) ...
-    #   "Рекомендуемые игры: ..."
-    #   "Незарегистрированные пользователи не могут..."
-    #   "Комментарии к игре"
-    #   [USER COMMENTS with dates/usernames] <-- MUST EXCLUDE
-    #   ... sidebar, footer ...
-    try:
-        url = f"{OG_BASE}/game/{game_id}.html"
-        html = fetch_cached(url)
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Use plain text extraction with boundary markers.
-        # This is far more reliable than DOM decomposition.
-        full_text = soup.get_text(separator="\n")
-
-        # Find the START of description zone:
-        # It comes after the last tab link text. The tabs are:
-        # "Описание", "Файлы", "Скриншоты (N)", "Видео (N)", "Обложки (N)", "Играть в браузере"
-        start_idx = 0
-        for marker in ["Играть в браузере", "Обложки (", "Обложки(", "Видео (", "Видео("]:
-            idx = full_text.find(marker)
-            if idx >= 0:
-                # Move past this marker + its line
-                nl = full_text.find("\n", idx)
-                if nl >= 0:
-                    start_idx = max(start_idx, nl + 1)
-
-        # Also skip past any screenshot caption block right after tabs
-        # (the 3 inline screenshot thumbnails show as "Скриншот: GameName" text)
-        screenshot_zone_end = start_idx
-        for i in range(start_idx, min(start_idx + 500, len(full_text))):
-            chunk = full_text[start_idx:i]
-            if "Скриншот:" in chunk or "скриншот:" in chunk:
-                nl = full_text.find("\n", i)
-                if nl >= 0:
-                    screenshot_zone_end = nl + 1
-        start_idx = max(start_idx, screenshot_zone_end)
-
-        # Find the END of description zone:
-        # Priority order of end markers
-        end_idx = len(full_text)
-        for marker in [
-            "Автор обзора:",               # author credit (most common end marker)
-            "Развернуть описание",          # "expand description" link
-            "Время и место:",              # first property tag
-            "Особенность геймплея:",       # property tag
-            "Перспектива:",                # property tag
-            "Страна или регион",           # property tag
-            "Тематика:",                   # property tag
-            "Технические детали:",          # property tag
-            "Элемент жанра:",              # property tag
-            "Язык:",                        # property tag
-            "Рекомендуемые",               # recommended games
-            "Незарегистрированные",         # unregistered users notice
-            "Комментарии к игре",          # comments header (last resort)
-        ]:
-            idx = full_text.find(marker, start_idx)
-            if start_idx < idx < end_idx:
-                end_idx = idx
-                break  # use the first (highest priority) marker found
-
-        desc = ""
-        if start_idx < end_idx:
-            raw = full_text[start_idx:end_idx].strip()
-            # Clean up line by line
-            lines = raw.split("\n")
-            clean = []
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    if clean and clean[-1] != "":
-                        clean.append("")  # preserve paragraph breaks
-                    continue
-                # Skip UI noise
-                if len(line) < 5:
-                    continue
-                clean.append(line)
-
-            desc = "\n".join(clean).strip()
-            # Remove trailing empty lines
-            desc = desc.strip()
-
-        result["description"] = desc[:2000] if desc else ""
-    except Exception as e:
-        print(f"  Detail fetch failed for {game_id}: {e}")
-
-    return result
 
 
 # --- Profile & Queue ---
@@ -583,7 +636,7 @@ def score_game_for_profile(game, profile):
         score += pw[game["platform"]]
     if yr[0] <= game.get("year", 0) <= yr[1]:
         score += 0.3
-    if game.get("ratingOG", 0) >= 8:
+    if game.get("rating_og", 0) >= 8:
         score += 0.2
 
     return score
@@ -606,7 +659,7 @@ def rebuild_pool_and_queue():
     """Rebuild unrated pool and refill queue."""
     global unrated_pool, game_queue
     rated_ids = set(ratings_data.get("games", {}).keys())
-    unrated_pool = [g for g in catalog_index.get("games", []) if str(g["id"]) not in rated_ids]
+    unrated_pool = [g for g in catalog_index.get("games", []) if g["id"] not in rated_ids]
     random.shuffle(unrated_pool)
     refill_queue()
 
@@ -653,13 +706,22 @@ def pop_next_game():
 
 # --- Prefetch ---
 
+def fetch_game_detail(game_id):
+    """Fetch game detail using the appropriate source."""
+    src_id, local_id = parse_game_id(game_id)
+    source = SOURCES.get(src_id)
+    if not source:
+        return {"description": "", "screenshots": []}
+    return source.parse_game_detail(local_id)
+
+
 def prefetch_games():
     """Prefetch detail for next games in queue in background."""
     for i in range(min(PREFETCH_AHEAD, len(game_queue))):
         gid = game_queue[i]["id"]
         if gid not in prefetch_cache:
             try:
-                detail = parse_game_detail(gid)
+                detail = fetch_game_detail(gid)
                 prefetch_cache[gid] = detail
             except Exception:
                 pass
@@ -676,6 +738,61 @@ def load_ratings():
             pass
     ratings_data.setdefault("wishlist", {})
 
+    # Migrate legacy bare IDs to og: prefixed IDs
+    if ratings_data.get("version", 1) < 2:
+        migrated = False
+
+        # Migrate games dict keys
+        old_games = ratings_data.get("games", {})
+        new_games = {}
+        for gid, info in old_games.items():
+            if ":" not in str(gid):
+                new_games[make_game_id("og", gid)] = info
+                migrated = True
+            else:
+                new_games[gid] = info
+        if migrated:
+            ratings_data["games"] = new_games
+
+        # Migrate wishlist dict keys + backfill sourceUrl
+        old_wl = ratings_data.get("wishlist", {})
+        new_wl = {}
+        for gid, info in old_wl.items():
+            if ":" not in str(gid):
+                new_gid = make_game_id("og", gid)
+                new_wl[new_gid] = info
+                migrated = True
+            else:
+                new_gid = gid
+                new_wl[new_gid] = info
+            # Backfill sourceUrl if missing
+            if "sourceUrl" not in new_wl[new_gid]:
+                sid, lid = parse_game_id(new_gid)
+                src = SOURCES.get(sid)
+                if src:
+                    new_wl[new_gid]["sourceUrl"] = src.game_url(lid)
+                    migrated = True
+        if migrated or new_wl != old_wl:
+            ratings_data["wishlist"] = new_wl
+
+        # Migrate history entries
+        old_hist = ratings_data.get("history", [])
+        new_hist = []
+        for h in old_hist:
+            s = str(h)
+            if ":" not in s:
+                new_hist.append(make_game_id("og", s))
+                migrated = True
+            else:
+                new_hist.append(s)
+        if migrated:
+            ratings_data["history"] = new_hist
+
+        ratings_data["version"] = 2
+        if migrated:
+            save_ratings()
+            print("Migrated ratings to source-prefixed IDs (version 2).")
+
 
 def save_ratings():
     RATINGS_FILE.write_text(json.dumps(ratings_data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -689,6 +806,35 @@ def load_catalog_index():
             print(f"Loaded catalog index: {catalog_index['totalGames']} games")
         except:
             pass
+
+    # Migrate legacy IDs (bare integers) to og: prefixed IDs
+    games = catalog_index.get("games", [])
+    migrated = False
+    for g in games:
+        gid = str(g.get("id", ""))
+        if ":" not in gid:
+            g["id"] = make_game_id("og", gid)
+            g.setdefault("sources", {"og": int(gid) if gid.isdigit() else gid})
+            migrated = True
+        # Rename ratingOG -> rating_og
+        if "ratingOG" in g:
+            g["rating_og"] = g.pop("ratingOG")
+            migrated = True
+        # Ensure sources field exists
+        if "sources" not in g:
+            _, lid = parse_game_id(g["id"])
+            g["sources"] = {"og": int(lid) if lid.isdigit() else lid}
+            migrated = True
+
+    # Remove legacy maxPages field
+    if "maxPages" in catalog_index:
+        del catalog_index["maxPages"]
+        migrated = True
+
+    if migrated and games:
+        catalog_index["games"] = games
+        CATALOG_INDEX_FILE.write_text(json.dumps(catalog_index, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"Migrated catalog index to source-prefixed IDs.")
 
 
 # --- HTTP Handler ---
@@ -728,9 +874,9 @@ class Handler(SimpleHTTPRequestHandler):
         elif path == "/api/next":
             self.handle_next()
         elif path.startswith("/api/game/"):
-            m = re.match(r"/api/game/(\d+)", path)
+            m = re.match(r"/api/game/(.+)", path)
             if m:
-                self.handle_game(int(m.group(1)))
+                self.handle_game(m.group(1))
             else:
                 self.send_json({"error": "bad id"}, 400)
         elif path == "/api/proxy":
@@ -799,22 +945,42 @@ class Handler(SimpleHTTPRequestHandler):
         if gid in prefetch_cache:
             detail = prefetch_cache.pop(gid)
         else:
-            detail = parse_game_detail(gid)
+            detail = fetch_game_detail(gid)
 
         result = {**game, **detail}
+
+        # Add source URL and name
+        src_id, local_id = parse_game_id(gid)
+        source = SOURCES.get(src_id)
+        if source:
+            result["sourceUrl"] = source.game_url(local_id)
+            result["sourceName"] = source.SOURCE_NAME
+
         self.send_json(result)
 
         # Trigger background prefetch
         threading.Thread(target=prefetch_games, daemon=True).start()
 
     def handle_game(self, game_id):
+        # Normalize legacy bare IDs
+        if ":" not in str(game_id):
+            game_id = make_game_id("og", game_id)
+
         if game_id in prefetch_cache:
             detail = prefetch_cache.pop(game_id)
         else:
-            detail = parse_game_detail(game_id)
+            detail = fetch_game_detail(game_id)
         # Merge with catalog info
         cat_entry = next((g for g in catalog_index.get("games", []) if g["id"] == game_id), {})
         result = {**cat_entry, **detail}
+
+        # Add source URL and name
+        src_id, local_id = parse_game_id(game_id)
+        source = SOURCES.get(src_id)
+        if source:
+            result["sourceUrl"] = source.game_url(local_id)
+            result["sourceName"] = source.SOURCE_NAME
+
         self.send_json(result)
 
     def handle_proxy(self, url):
@@ -852,16 +1018,26 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error": "no gameId"}, 400)
             return
 
+        # Normalize legacy bare IDs
+        if ":" not in game_id:
+            game_id = make_game_id("og", game_id)
+
+        # Derive sourceUrl for wishlist entries
+        src_id, local_id = parse_game_id(game_id)
+        source = SOURCES.get(src_id)
+        source_url = source.game_url(local_id) if source else ""
+
         # Wishlist toggle
         if data.get("wishlist") is not None:
             wl = ratings_data.setdefault("wishlist", {})
             if data["wishlist"]:
-                cat_entry = next((g for g in catalog_index.get("games", []) if str(g["id"]) == game_id), {})
+                cat_entry = next((g for g in catalog_index.get("games", []) if g["id"] == game_id), {})
                 wl[game_id] = {
                     "name": cat_entry.get("name", data.get("name", "")),
                     "genre": cat_entry.get("genre", ""),
                     "year": cat_entry.get("year", 0),
                     "platform": cat_entry.get("platform", ""),
+                    "sourceUrl": source_url,
                     "ts": int(time.time()),
                 }
             else:
@@ -876,20 +1052,18 @@ class Handler(SimpleHTTPRequestHandler):
             if game_id in ratings_data["games"]:
                 removed = ratings_data["games"].pop(game_id)
                 # Add back to pool and front of queue
-                cat_entry = next((g for g in catalog_index.get("games", []) if str(g["id"]) == game_id), None)
+                cat_entry = next((g for g in catalog_index.get("games", []) if g["id"] == game_id), None)
                 if cat_entry:
                     unrated_pool.insert(0, cat_entry)
                     game_queue.insert(0, {**cat_entry, "_source": "undo"})
-                if game_id in [str(h) for h in ratings_data.get("history", [])]:
-                    hist = ratings_data.get("history", [])
-                    # Remove last occurrence
-                    for i in range(len(hist) - 1, -1, -1):
-                        if str(hist[i]) == game_id:
-                            hist.pop(i)
-                            break
+                hist = ratings_data.get("history", [])
+                for i in range(len(hist) - 1, -1, -1):
+                    if str(hist[i]) == game_id:
+                        hist.pop(i)
+                        break
         else:
             # Find game info from catalog
-            cat_entry = next((g for g in catalog_index.get("games", []) if str(g["id"]) == game_id), {})
+            cat_entry = next((g for g in catalog_index.get("games", []) if g["id"] == game_id), {})
             ratings_data["games"][game_id] = {
                 "rating": rating,
                 "name": cat_entry.get("name", data.get("name", "")),
@@ -898,7 +1072,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "platform": cat_entry.get("platform", ""),
                 "ts": int(time.time()),
             }
-            ratings_data.setdefault("history", []).append(int(game_id))
+            ratings_data.setdefault("history", []).append(game_id)
 
         compute_profile()
         save_ratings()
