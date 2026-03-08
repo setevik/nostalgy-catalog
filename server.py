@@ -273,6 +273,7 @@ PROFILE_MATCH_RATIO = 0.30
 PREFETCH_AHEAD = 2
 AUTO_UPDATE_SKIP_SEC = 24 * 3600       # skip update if scanned < 24h ago
 QUICK_SCAN_PAGES = 20                  # pages to check in incremental scan
+CACHE_MAX_AGE = 7 * 86400              # disk cache TTL (default 7 days)
 
 # --- Global State ---
 catalog_index = {"scannedAt": None, "totalGames": 0, "games": []}
@@ -308,7 +309,7 @@ def cache_path(url):
     return CACHE_DIR / f"{h}.html"
 
 
-def fetch_cached(url, max_age=7 * 86400):
+def fetch_cached(url, max_age=CACHE_MAX_AGE):
     cp = cache_path(url)
     if cp.exists():
         age = time.time() - cp.stat().st_mtime
@@ -993,16 +994,43 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error": f"domain not allowed: {domain}"}, 403)
             return
         try:
+            # Check disk cache for proxied resources (images, etc.)
+            h = hashlib.md5(url.encode()).hexdigest()
+            proxy_cache = CACHE_DIR / f"proxy_{h}"
+            meta_cache = CACHE_DIR / f"proxy_{h}.meta"
+
+            if proxy_cache.exists() and meta_cache.exists():
+                age = time.time() - proxy_cache.stat().st_mtime
+                if age < CACHE_MAX_AGE:
+                    ct = meta_cache.read_text(encoding="utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", ct)
+                    self.send_header("Cache-Control", "public, max-age=86400")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(proxy_cache.read_bytes())
+                    return
+
             resp = rate_limited_get(url)
-            self.send_response(200)
             ct = resp.headers.get("Content-Type", "application/octet-stream")
+
+            # Cache to disk
+            proxy_cache.write_bytes(resp.content)
+            meta_cache.write_text(ct, encoding="utf-8")
+
+            self.send_response(200)
             self.send_header("Content-Type", ct)
             self.send_header("Cache-Control", "public, max-age=86400")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(resp.content)
+        except BrokenPipeError:
+            pass
         except Exception as e:
-            self.send_json({"error": str(e)}, 502)
+            try:
+                self.send_json({"error": str(e)}, 502)
+            except BrokenPipeError:
+                pass
 
     def handle_rate(self, body):
         try:
@@ -1078,6 +1106,9 @@ class Handler(SimpleHTTPRequestHandler):
         save_ratings()
         self.send_json({"ok": True, "stats": ratings_data.get("stats"), "profile": ratings_data.get("profile")})
 
+        # Trigger prefetch early so next game detail is ready before /api/next
+        threading.Thread(target=prefetch_games, daemon=True).start()
+
     def handle_export(self):
         wl = ratings_data.get("wishlist", {})
         lines = ["id,name,genre,year,platform,rating,wishlisted,timestamp"]
@@ -1109,6 +1140,9 @@ def main():
         scan_progress["done"] = True
         scan_progress["total"] = 1
         scan_progress["scanned"] = 1
+
+        # Pre-populate prefetch cache for first games in queue
+        threading.Thread(target=prefetch_games, daemon=True).start()
 
         # Auto-update check
         age = get_catalog_age_seconds()
